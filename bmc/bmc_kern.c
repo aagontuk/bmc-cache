@@ -67,35 +67,35 @@ struct parsing_context {
 	unsigned short read_pkt_offset;
 	unsigned short write_pkt_offset;
 };
-struct bpf_map_def SEC("maps") map_parsing_context = {
-	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
-	.key_size = sizeof(unsigned int),
-	.value_size = sizeof(struct parsing_context),
-	.max_entries = 1,
-};
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, unsigned int);
+	__type(value, struct parsing_context);
+	__uint(max_entries, 1);
+} map_parsing_context SEC(".maps");
 
 /* stats */
-struct bpf_map_def SEC("maps") map_stats = {
-	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
-	.key_size = sizeof(unsigned int),
-	.value_size = sizeof(struct bmc_stats),
-	.max_entries = 1,
-};
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, unsigned int);
+	__type(value, struct bmc_stats);
+	__uint(max_entries, 1);
+} map_stats SEC(".maps");
 
 /* program maps */
-struct bpf_map_def SEC("maps") map_progs_xdp = {
-	.type = BPF_MAP_TYPE_PROG_ARRAY,
-	.key_size = sizeof(u32),
-	.value_size = sizeof(u32),
-	.max_entries = BMC_PROG_XDP_MAX,
-};
+struct {
+	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
+	__type(key, u32);
+	__type(value, u32);
+	__uint(max_entries, BMC_PROG_XDP_MAX);
+} map_progs_xdp SEC(".maps");
 
-struct bpf_map_def SEC("maps") map_progs_tc = {
-	.type = BPF_MAP_TYPE_PROG_ARRAY,
-	.key_size = sizeof(u32),
-	.value_size = sizeof(u32),
-	.max_entries = BMC_PROG_TC_MAX,
-};
+struct {
+	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
+	__type(key, u32);
+	__type(value, u32);
+	__uint(max_entries, BMC_PROG_TC_MAX);
+} map_progs_tc SEC(".maps");
 
 
 static inline u16 compute_ip_checksum(struct iphdr *ip)
