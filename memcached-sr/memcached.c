@@ -133,6 +133,7 @@ static void _get_extstore_cb(void *e, obj_io *io, int ret);
 static inline int _get_extstore(conn *c, item *it, int iovst, int iovcnt);
 #endif
 static void conn_free(conn *c);
+static int ignore_signal(int signum);
 
 /** exported globals **/
 struct stats stats;
@@ -517,6 +518,17 @@ static const char *prot_text(enum protocol prot) {
             break;
     }
     return rv;
+}
+
+static int ignore_signal(int signum) {
+    struct sigaction sa;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = SIG_IGN;
+    if (sigemptyset(&sa.sa_mask) == -1) {
+        return -1;
+    }
+    return sigaction(signum, &sa, NULL);
 }
 
 void conn_close_idle(conn *c) {
@@ -9499,7 +9511,7 @@ int main (int argc, char **argv) {
     /* daemonize if requested */
     /* if we want to ensure our ability to dump core, don't chdir to / */
     if (do_daemonize) {
-        if (sigignore(SIGHUP) == -1) {
+        if (ignore_signal(SIGHUP) == -1) {
             perror("Failed to ignore SIGHUP");
         }
         if (daemonize(maxcore, settings.verbose) == -1) {
@@ -9647,7 +9659,7 @@ int main (int argc, char **argv) {
      * ignore SIGPIPE signals; we can use errno == EPIPE if we
      * need that information
      */
-    if (sigignore(SIGPIPE) == -1) {
+    if (ignore_signal(SIGPIPE) == -1) {
         perror("failed to ignore SIGPIPE; sigaction");
         exit(EX_OSERR);
     }
