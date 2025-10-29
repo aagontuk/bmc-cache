@@ -157,11 +157,14 @@ int bmc_rx_filter_main(struct xdp_md *ctx)
 				return XDP_PASS;
 			}
 			stats->get_recv_count++;
+      // bpf_printk("BMC: GET request received\n");
 
 			struct parsing_context *pctx = bpf_map_lookup_elem(&map_parsing_context, &zero);
 			if (!pctx) {
+        // bpf_printk("BMC: Parsing context failed\n");
 				return XDP_PASS;
 			}
+      // bpf_printk("BMC: Initializing parsing context\n");
 			pctx->key_count = 0;
 			pctx->current_key = 0;
 			pctx->write_pkt_offset = 0;
@@ -169,11 +172,21 @@ int bmc_rx_filter_main(struct xdp_md *ctx)
 			unsigned int off;
 #pragma clang loop unroll(disable)
 			for (off = 4; off < BMC_MAX_PACKET_LENGTH && payload+off+1 <= data_end && payload[off] == ' '; off++) {} // move offset to the start of the first key
+      // bpf_printk("BMC: First key offset %d\n", off);
 			if (off < BMC_MAX_PACKET_LENGTH) {
 				pctx->read_pkt_offset = off; // save offset
-				if (bpf_xdp_adjust_head(ctx, (int)(sizeof(*eth) + sizeof(*ip) + sizeof(*udp) + sizeof(struct memcached_udp_header) + off))) { // push headers + 'get ' keyword
+        int delta = sizeof(*eth) + sizeof(*ip) + sizeof(*udp) + sizeof(struct memcached_udp_header) + off;
+        int pkt_sz = data_end - data;
+        u32 ip_hdr_len = ip->ihl * 4;
+        u32 udp_len = ntohs(udp->len);
+        int retval = bpf_xdp_adjust_head(ctx, (int)(sizeof(*eth) + sizeof(*ip) + sizeof(*udp) + sizeof(struct memcached_udp_header) + off));
+				if (retval) { // push headers + 'get ' keyword
+          // bpf_printk("BMC: Adjust head failed with %d, delta: %d, pkt_sz: %d\n", retval, delta, pkt_sz);
+          // bpf_printk("BMC: ip_hdr_len: %d, udp_len: %d\n", ip_hdr_len, udp_len);
+          // bpf_printk("BMC: mem_hdr_len: %d, off: %d\n", sizeof(struct memcached_udp_header), off);
 					return XDP_PASS;
 				}
+        // bpf_printk("BMC: Processing keys\n");
 				bpf_tail_call(ctx, &map_progs_xdp, BMC_PROG_XDP_HASH_KEYS);
 			}
 		}
@@ -194,14 +207,17 @@ int bmc_hash_keys_main(struct xdp_md *ctx)
 	char *payload = (char *) data;
 	unsigned int zero = 0;
 
+  // bpf_printk("BMC: Hashing keys\n");
 	if (payload >= data_end)
 		return XDP_PASS;
 
+  // bpf_printk("BMC: Looking up parsing context\n");
 	struct parsing_context *pctx = bpf_map_lookup_elem(&map_parsing_context, &zero);
 	if (!pctx) {
 		return XDP_PASS;
 	}
 
+  // bpf_printk("BMC: Looking up key %d\n", pctx->key_count);
 	struct memcached_key *key = bpf_map_lookup_elem(&map_keys, &pctx->key_count);
 	if (!key) {
 		return XDP_PASS;
@@ -233,14 +249,19 @@ int bmc_hash_keys_main(struct xdp_md *ctx)
 	}
 
 	u32 cache_idx = key->hash % BMC_CACHE_ENTRY_COUNT;
+  // bpf_printk("BMC: Looking up cache entry at index %d\n", cache_idx);
 	struct bmc_cache_entry *entry = bpf_map_lookup_elem(&map_kcache, &cache_idx);
 	if (!entry) { // should never happen since cache map is of type BPF_MAP_TYPE_ARRAY
 		return XDP_PASS;
 	}
 
+  int entry_key_hash;
+
 	bpf_spin_lock(&entry->lock);
+  entry_key_hash = entry->hash;
 	if (entry->valid && entry->hash == key->hash) { // potential cache hit
 		bpf_spin_unlock(&entry->lock);
+    // bpf_printk("BMC: Potential cache hit, checking key\n");
 		unsigned int i = 0;
 #pragma clang loop unroll(disable)
 		for (; i < key_len && payload+i+1 <= data_end; i++) { // copy the request key to compare it with the one stored in the cache later
@@ -250,6 +271,7 @@ int bmc_hash_keys_main(struct xdp_md *ctx)
 		pctx->key_count++;
 	} else { // cache miss
 		bpf_spin_unlock(&entry->lock);
+    // bpf_printk("BMC: Cache miss, entry hash: %x, key hash %x\n", entry_key_hash, key->hash);
 		struct bmc_stats *stats = bpf_map_lookup_elem(&map_stats, &zero);
 		if (!stats) {
 			return XDP_PASS;
@@ -448,8 +470,9 @@ int bmc_invalidate_cache_main(struct xdp_md *ctx)
 		return XDP_PASS;
 	}
 
-	u32 hash;
+	u32 hash, cache_idx;
 	int set_found = 0, key_found = 0;
+  int set_completed = 0;
 
 #pragma clang loop unroll(disable)
 	for (unsigned int off = 0; off < BMC_MAX_PACKET_LENGTH && payload+off+1 <= data_end; off++) {
@@ -472,7 +495,7 @@ int bmc_invalidate_cache_main(struct xdp_md *ctx)
 		}
 		else if (key_found == 1) {
 			if (payload[off] == ' ') { // found the end of the key
-				u32 cache_idx = hash % BMC_CACHE_ENTRY_COUNT;
+				cache_idx = hash % BMC_CACHE_ENTRY_COUNT;
 				struct bmc_cache_entry *entry = bpf_map_lookup_elem(&map_kcache, &cache_idx);
 				if (!entry) {
 					return XDP_PASS;
@@ -485,6 +508,8 @@ int bmc_invalidate_cache_main(struct xdp_md *ctx)
 				bpf_spin_unlock(&entry->lock);
 				set_found = 0;
 				key_found = 0;
+        set_completed = 1;
+        // bpf_printk("BMC: Cache entry invalidated, index %u\n", cache_idx);
 			}
 			else { // still processing the key
 				hash ^= payload[off];
@@ -492,6 +517,8 @@ int bmc_invalidate_cache_main(struct xdp_md *ctx)
 			}
 		}
 	}
+
+  // bpf_printk("BMC: SET command processing completed, sets: %d, status: %d\n", stats->set_recv_count, set_completed);
 
 	return XDP_PASS;
 }
@@ -506,6 +533,8 @@ int bmc_tx_filter_main(struct __sk_buff *skb)
 	struct udphdr *udp = data + sizeof(*eth) + sizeof(*ip);
 	char *payload = data + sizeof(*eth) + sizeof(*ip) + sizeof(*udp) + sizeof(struct memcached_udp_header);
 	unsigned int zero = 0;
+
+  // bpf_printk("BMC: TX filter invoked\n");
 
 	// if the size exceeds the size of a cache entry do not bother going further
 	if (skb->len > BMC_MAX_CACHE_DATA_SIZE + sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr) + sizeof(struct memcached_udp_header))
@@ -530,6 +559,7 @@ int bmc_tx_filter_main(struct __sk_buff *skb)
 			return XDP_PASS;
 		}
 		stats->get_resp_count++;
+    // bpf_printk("BMC: GET response received, updating cache\n");
 
 		bpf_tail_call(skb, &map_progs_tc, BMC_PROG_TC_UPDATE_CACHE);
 	}
@@ -545,6 +575,8 @@ int bmc_update_cache_main(struct __sk_buff *skb)
 	char *payload = (data + sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr) + sizeof(struct memcached_udp_header));
 	unsigned int zero = 0;
 
+  // bpf_printk("BMC: bmc_update_cache_main\n");
+
 	u32 hash = FNV_OFFSET_BASIS_32;
 
 	// compute the key hash
@@ -554,11 +586,15 @@ int bmc_update_cache_main(struct __sk_buff *skb)
 		hash *= FNV_PRIME_32;
 	}
 
+  // bpf_printk("BMC: Computed hash %u for update\n", hash);
+
 	u32 cache_idx = hash % BMC_CACHE_ENTRY_COUNT;
 	struct bmc_cache_entry *entry = bpf_map_lookup_elem(&map_kcache, &cache_idx);
 	if (!entry) {
 		return TC_ACT_OK;
 	}
+
+  // bpf_printk("BMC: Updating cache entry at index %u\n", cache_idx);
 
 	bpf_spin_lock(&entry->lock);
 	if (entry->valid && entry->hash == hash) { // cache is up-to-date; no need to update
@@ -605,3 +641,5 @@ int bmc_update_cache_main(struct __sk_buff *skb)
 }
 
 // to test colisions: keys declinate0123456 and macallums0123456 have hash colision
+
+char _license[] SEC("license") = "GPL";
